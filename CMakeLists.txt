@@ -19,3 +19,7 @@ set(test_dir "${cpp_dir}/test")
 file(GLOB_RECURSE test_srcs "${test_dir}/*.hpp" "${test_dir}/*.cpp")
 add_executable(bolt_test "${test_srcs}")
 target_link_libraries(bolt_test PUBLIC bolt)
+
+set(demo_dir "demo")
+add_executable(demo "${demo_dir}/main.cc")
+target_link_libraries(demo PUBLIC bolt)
