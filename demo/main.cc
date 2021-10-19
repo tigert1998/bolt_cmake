@@ -1,11 +1,10 @@
 #include <glog/logging.h>
 
 #include <iostream>
+#include <memory>
 
 #include "src/include/public.hpp"
 #include "unsupported/Eigen/MatrixFunctions"
-
-MatrixXf a, b, c;
 
 #define MAP_MAT(mat)                                                  \
   std::vector<float> mat##_data(mat.rows() * mat.cols());             \
@@ -15,12 +14,12 @@ MatrixXf a, b, c;
         mat##_data.data(), tmp_mat.rows(), tmp_mat.cols()) = tmp_mat; \
   } while (0)
 
-void Init(int n, int d, int m) {
-  a.resize(n, d);
-  b.resize(d, m);
-  a.setRandom();
-  b.setRandom();
-  c = a * b;
+void Init(int n, int d, int m, MatrixXf* a, MatrixXf* b, MatrixXf* c) {
+  a->resize(n, d);
+  b->resize(d, m);
+  a->setRandom();
+  b->setRandom();
+  *c = *a * *b;
 }
 
 void KMeans(const MatrixXf& a, int num_centroids, int num_iters,
@@ -137,18 +136,18 @@ void CalcScaleAndOffsets(const MatrixXf& fake_b_t,
   }
 }
 
-void BoltMM() {
-  int nbytes = 8;
-  BoltEncoder enc(nbytes);
+std::unique_ptr<BoltEncoder> TrainBolt(const MatrixXf& mat, int nbytes,
+                                       float* out_offset, float* out_scale_by) {
+  auto enc = std::make_unique<BoltEncoder>(nbytes);
   int ncodebooks = nbytes * 2;
-  CHECK(a.cols() % ncodebooks == 0);
-  int subvect_len = a.cols() / ncodebooks;
+  CHECK(mat.cols() % ncodebooks == 0);
+  int subvect_len = mat.cols() / ncodebooks;
 
   std::vector<MatrixXf> codebooks(ncodebooks);
   MatrixXf centroids(16 * ncodebooks, subvect_len);
   for (int i = 0; i < ncodebooks; i++) {
     std::vector<int> belongs;
-    KMeans(a.block(0, subvect_len * i, a.rows(), subvect_len), 16, 16,
+    KMeans(mat.block(0, subvect_len * i, mat.rows(), subvect_len), 16, 16,
            &codebooks[i], &belongs);
     centroids.block(16 * i, 0, 16, subvect_len) = codebooks[i];
   }
@@ -156,29 +155,66 @@ void BoltMM() {
   VectorXf floor;
   float alpha, scale_by;
   {
-    int num_rows = a.rows() * 0.25;
-    MatrixXf fake_b_t(num_rows, a.cols());
+    int num_rows = mat.rows() * 0.25;
+    MatrixXf fake_b_t(num_rows, mat.cols());
     for (int i = 0; i < num_rows; i++) {
-      int j = rand() % a.rows();
-      fake_b_t.row(i) = a.row(j);
+      int j = rand() % mat.rows();
+      fake_b_t.row(i) = mat.row(j);
     }
 
     CalcScaleAndOffsets(fake_b_t, codebooks, &floor, &scale_by, &alpha);
   }
 
-  enc.set_scale(scale_by);
+  enc->set_scale(scale_by);
   VectorXf offsets_to_set = -floor * scale_by;
-  enc.set_offsets(offsets_to_set.data(), offsets_to_set.size());
+  enc->set_offsets(offsets_to_set.data(), offsets_to_set.size());
 
   MAP_MAT(centroids);
-  enc.set_centroids(centroids_data.data(), centroids.rows(), centroids.cols());
+  enc->set_centroids(centroids_data.data(), centroids.rows(), centroids.cols());
 
-  MAP_MAT(a);
-  enc.set_data(a_data.data(), a.rows(), a.cols());
+  MAP_MAT(mat);
+  enc->set_data(mat_data.data(), mat.rows(), mat.cols());
+
+  *out_scale_by = scale_by;
+  *out_offset = 0;
+  for (int i = 0; i < offsets_to_set.size(); i++)
+    *out_offset += offsets_to_set[i];
+
+  return enc;
+}
+
+MatrixXf MMBolt(BoltEncoder* enc, const MatrixXf& mat, float offset,
+                float scale_by) {
+  MatrixXf ret;
+  for (int i = 0; i < mat.cols(); i++) {
+    VectorXf col = mat.col(i);
+    RowVector<uint16_t> ans = enc->dot_prods(col.data(), col.size());
+    RowVector<float> ans_float = ans.template cast<float>();
+    ans_float.array() -= offset;
+    ans_float.array() /= scale_by;
+
+    if (i == 0) {
+      ret = ans_float.transpose();
+    } else {
+      ret.conservativeResize(ret.rows(), ret.cols() + 1);
+      ret.col(ret.cols() - 1) = ans_float.transpose();
+    }
+  }
+
+  return ret;
 }
 
 int main() {
-  Init(64, 32, 64);
-  BoltMM();
+  MatrixXf a, b, c;
+
+  Init(64, 32, 16, &a, &b, &c);
+  float offset, scale_by;
+
+  auto enc = TrainBolt(a, 8, &offset, &scale_by);
+  MatrixXf test_c = MMBolt(enc.get(), b, offset, scale_by);
+
+  LOG(INFO) << "c:\n" << c;
+  LOG(INFO) << "test_c:\n" << test_c;
+
   return 0;
 }

@@ -1,6 +1,7 @@
 project(bolt)
 
-set(CMAKE_CXX_FLAGS "-march=native -mavx -ffast-math -std=c++17")
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_FLAGS "-march=native -mavx -ffast-math")
 add_compile_definitions(BLAZE)
 
 set(3rd_party_dir "3rd_party")
